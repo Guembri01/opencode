@@ -36,6 +36,8 @@ const newAccountMethodID = Integration.MethodID.make("chatgpt-token-sharing-new"
 // the client instead of registering another app in the user's ChatGPT settings.
 const profilesKey = "chatgpt-profiles"
 const lastClientKey = "chatgpt-last-client"
+// Clients whose refresh token OpenAI rejected. Signing in again while only these are saved reconnects one of them.
+const expiredKey = "chatgpt-expired-clients"
 const modelCacheKey = (clientID: string) => `models:${clientID}`
 // Used when the catalog has no Sign in with ChatGPT list. gpt-5.5 is rejected there.
 const fallbackModels = new Set([
@@ -101,6 +103,11 @@ const decodeInvalidGrant = Schema.decodeUnknownOption(
 )
 const Profile = Schema.Struct({ subject: Schema.String, email: Schema.optional(Schema.String), idToken: Schema.String })
 const decodeProfiles = Schema.decodeUnknownOption(Schema.Record(Schema.String, Profile))
+const decodeExpired = Schema.decodeUnknownOption(Schema.Array(Schema.String))
+const expiredClients = (storage: Context["storage"]) =>
+  storage
+    .get(expiredKey)
+    .pipe(Effect.map((value) => Option.getOrElse(decodeExpired(value), (): readonly string[] => [])))
 const decodeMetadata = Schema.decodeUnknownOption(
   Schema.Struct({
     clientID: Schema.String,
@@ -111,7 +118,7 @@ const decodeMetadata = Schema.decodeUnknownOption(
 
 const signIn = (
   app: App.Info,
-  savedClientID: () => string | undefined,
+  savedClients: () => Effect.Effect<ReadonlyArray<string>>,
   storage: Context["storage"],
   newAccount = false,
 ) =>
@@ -132,7 +139,10 @@ const signIn = (
         const nonce = randomValue()
         const profiles = Option.getOrUndefined(decodeProfiles(yield* storage.get(profilesKey)))
         const last = yield* storage.get(lastClientKey)
-        const savedID = newAccount ? undefined : (savedClientID() ?? (typeof last === "string" ? last : undefined))
+        const expired = yield* expiredClients(storage)
+        // A working saved account means this sign-in adds another one, which needs its own client.
+        const adding = (yield* savedClients()).some((id) => !expired.includes(id))
+        const savedID = newAccount || adding || typeof last !== "string" ? undefined : last
         const profile = savedID ? profiles?.[savedID] : undefined
         // `response` is the browser's pending callback request; a pasted redirect has none.
         const received = yield* Deferred.make<{ code: string; clientID?: string; response?: ServerResponse }, Error>()
@@ -218,6 +228,12 @@ const signIn = (
               const saved = Option.getOrUndefined(decodeProfiles(yield* storage.get(profilesKey)))
               yield* storage.set(profilesKey, { ...saved, [clientID]: { ...identity, idToken: tokens.id_token } })
               yield* storage.set(lastClientKey, clientID)
+              const stale = yield* expiredClients(storage)
+              if (stale.includes(clientID))
+                yield* storage.set(
+                  expiredKey,
+                  stale.filter((id) => id !== clientID),
+                )
               return credential(tokens, clientID)
             }).pipe(
               Effect.tap(() => respond()),
@@ -232,7 +248,17 @@ const signIn = (
           }),
         }
       }),
-    refresh: (value) => refresh(value, app),
+    refresh: (value) =>
+      refresh(value, app).pipe(
+        Effect.tapError((error) =>
+          Effect.gen(function* () {
+            const clientID = Option.getOrUndefined(decodeMetadata(value.metadata))?.clientID
+            if (!(error instanceof SignInExpired) || !clientID) return
+            const expired = yield* expiredClients(storage)
+            if (!expired.includes(clientID)) yield* storage.set(expiredKey, [...expired, clientID])
+          }),
+        ),
+      ),
     revoke: (value) => revoke(value, app),
   }) satisfies IntegrationOAuthMethodRegistration
 
@@ -281,10 +307,19 @@ export const ChatGPTPlugin = define({
       return !Equal.equals(previous, source)
     })
 
-    const activeClientID = () => Option.getOrUndefined(decodeMetadata(chatgpt?.metadata))?.clientID
+    const savedClients = () =>
+      credentials.list(integrationID).pipe(
+        Effect.map((entries) =>
+          entries.flatMap((entry) => {
+            if (entry.value.type !== "oauth" || entry.value.methodID !== methodID) return []
+            const clientID = Option.getOrUndefined(decodeMetadata(entry.value.metadata))?.clientID
+            return clientID ? [clientID] : []
+          }),
+        ),
+      )
     yield* ctx.integration.transform((editor) => {
-      editor.method.update(signIn(ctx.app, activeClientID, ctx.storage))
-      if (known) editor.method.update(signIn(ctx.app, activeClientID, ctx.storage, true))
+      editor.method.update(signIn(ctx.app, savedClients, ctx.storage))
+      if (known) editor.method.update(signIn(ctx.app, savedClients, ctx.storage, true))
     })
     yield* Effect.forEach(
       yield* credentials.list(Integration.ID.make("openai")),
@@ -562,13 +597,15 @@ export function verifyIDToken(
   })
 }
 
+class SignInExpired extends Error {}
+
 // `rejected` replaces the error when OpenAI answers invalid_grant, which means different things per grant type.
 function request<A>(url: string, init: RequestInit, rejected?: string) {
   return Effect.tryPromise({
     try: async (signal) => {
       const response = await fetch(url, { ...init, signal })
       if (response.ok) return response.json() as Promise<A>
-      if (rejected && Option.isSome(decodeInvalidGrant(await response.text()))) throw new Error(rejected)
+      if (rejected && Option.isSome(decodeInvalidGrant(await response.text()))) throw new SignInExpired(rejected)
       throw new Error(`Request failed: ${response.status}`)
     },
     catch: (cause) => cause,
