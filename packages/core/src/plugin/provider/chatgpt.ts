@@ -31,7 +31,6 @@ const tokenSharingScope = "chatgpt.tokens.use.direct"
 const providerID = Provider.ID.openai
 const integrationID = Integration.ID.make("openai")
 const methodID = Integration.MethodID.make("chatgpt-token-sharing")
-const newAccountMethodID = Integration.MethodID.make("chatgpt-token-sharing-new")
 // Each issued client belongs to one ChatGPT account and workspace. Profiles outlive logout so signing in again reuses
 // the client instead of registering another app in the user's ChatGPT settings.
 const profilesKey = "chatgpt-profiles"
@@ -116,18 +115,13 @@ const decodeMetadata = Schema.decodeUnknownOption(
   }),
 )
 
-const signIn = (
-  app: App.Info,
-  savedClients: () => Effect.Effect<ReadonlyArray<string>>,
-  storage: Context["storage"],
-  newAccount = false,
-) =>
+const signIn = (app: App.Info, savedClients: () => Effect.Effect<ReadonlyArray<string>>, storage: Context["storage"]) =>
   ({
     integrationID,
     method: {
-      id: newAccount ? newAccountMethodID : methodID,
+      id: methodID,
       type: "oauth",
-      label: newAccount ? "Use a different ChatGPT account" : "Sign in with ChatGPT",
+      label: "Sign in with ChatGPT",
     },
     authorize: () =>
       Effect.gen(function* () {
@@ -142,7 +136,7 @@ const signIn = (
         const expired = yield* expiredClients(storage)
         // A working saved account means this sign-in adds another one, which needs its own client.
         const adding = (yield* savedClients()).some((id) => !expired.includes(id))
-        const savedID = newAccount || adding || typeof last !== "string" ? undefined : last
+        const savedID = adding || typeof last !== "string" ? undefined : last
         const profile = savedID ? profiles?.[savedID] : undefined
         // `response` is the browser's pending callback request; a pasted redirect has none.
         const received = yield* Deferred.make<{ code: string; clientID?: string; response?: ServerResponse }, Error>()
@@ -222,7 +216,7 @@ const signIn = (
               if (profile && identity.subject !== profile.subject)
                 return yield* Effect.fail(
                   new Error(
-                    "ChatGPT signed in with a different account than this connection. Choose “Use a different ChatGPT account” instead.",
+                    "ChatGPT signed in with a different account than the one you last used. To add another account, connect your last account first, then choose Add account.",
                   ),
                 )
               const saved = Option.getOrUndefined(decodeProfiles(yield* storage.get(profilesKey)))
@@ -281,8 +275,6 @@ export const ChatGPTPlugin = define({
     const credentials = yield* Credential.Service
     const loading = Semaphore.makeUnsafe(1)
     let chatgpt: Credential.OAuth | undefined
-    // Offer a separate new-account sign-in once there is an account to switch away from.
-    let known = false
     // let available: ReadonlyArray<RemoteModel> | undefined
     let source: Effect.Success<ReturnType<typeof ctx.integration.connection.active>>
 
@@ -296,9 +288,6 @@ export const ChatGPTPlugin = define({
       const clientID = Option.getOrUndefined(decodeMetadata(chatgpt?.metadata))?.clientID
       if (clientID && (yield* ctx.storage.get(lastClientKey)) === undefined)
         yield* ctx.storage.set(lastClientKey, clientID)
-      const wasKnown = known
-      known = chatgpt !== undefined || typeof (yield* ctx.storage.get(lastClientKey)) === "string"
-      if (known !== wasKnown) yield* ctx.integration.reload()
       // if (previous !== IntegrationConnection.key(source)) {
       //   const metadata = Option.getOrUndefined(decodeMetadata(chatgpt?.metadata))
       //   const stored = metadata ? yield* ctx.storage.get(modelCacheKey(metadata.clientID)) : undefined
@@ -319,7 +308,6 @@ export const ChatGPTPlugin = define({
       )
     yield* ctx.integration.transform((editor) => {
       editor.method.update(signIn(ctx.app, savedClients, ctx.storage))
-      if (known) editor.method.update(signIn(ctx.app, savedClients, ctx.storage, true))
     })
     yield* Effect.forEach(
       yield* credentials.list(Integration.ID.make("openai")),

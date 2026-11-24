@@ -592,33 +592,11 @@ describe("ChatGPTPlugin", () => {
       expect(url.searchParams.has("agent_name_hint")).toBe(false)
       expect(url.searchParams.get("id_token_hint")).toBe("id-token")
       expect(url.searchParams.get("login_hint")).toBe("a@example.com")
-
-      const integrations = yield* Integration.Service
-      const attempt = yield* integrations.oauth.connect({
-        integrationID: Integration.ID.make("openai"),
-        methodID: Integration.MethodID.make("chatgpt-token-sharing-new"),
-      })
-      yield* integrations.oauth.cancel({ integrationID: Integration.ID.make("openai"), attemptID: attempt.attemptID })
-      const fresh = new URL(attempt.url)
-      expect(fresh.searchParams.get("client_id")).toBe("dynamic_agent_client")
-      expect(fresh.searchParams.get("agent_name_hint")).toBe("OpenCode")
-      expect(fresh.searchParams.has("id_token_hint")).toBe(false)
     }),
   )
 
-  it.effect("offers a new-account sign-in only after an account is known", () =>
+  it.effect("remembers the client of a connection made before profiles existed", () =>
     Effect.gen(function* () {
-      yield* addPlugin()
-      const integrations = yield* Integration.Service
-      const ids = () =>
-        integrations
-          .get(Integration.ID.make("openai"))
-          .pipe(
-            Effect.map((item) =>
-              item?.methods.map((method) => (method.type === "oauth" ? String(method.id) : undefined)),
-            ),
-          )
-      expect(yield* ids()).toEqual(["chatgpt-token-sharing"])
       const credentials = yield* Credential.Service
       yield* credentials.create({
         integrationID: Integration.ID.make("openai"),
@@ -631,11 +609,7 @@ describe("ChatGPTPlugin", () => {
           metadata: { clientID: "oaiapp_issued" },
         }),
       })
-      yield* Effect.gen(function* () {
-        const found = yield* ids()
-        if (found?.length !== 2) return yield* Effect.fail("pending")
-      }).pipe(Effect.retry(Schedule.spaced("10 millis")), Effect.timeout("2 seconds"))
-      expect(yield* ids()).toEqual(["chatgpt-token-sharing", "chatgpt-token-sharing-new"])
+      yield* addPlugin()
       const kv = yield* KV.Service
       expect(yield* PluginHost.storage(kv, ChatGPTPlugin.id).get("chatgpt-last-client")).toBe("oaiapp_issued")
     }),
