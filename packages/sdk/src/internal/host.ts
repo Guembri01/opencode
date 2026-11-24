@@ -2,7 +2,9 @@ export * as EmbeddedHost from "./host"
 
 import { SdkPlugins } from "@opencode/core/plugin/sdk"
 import type { Plugin } from "@opencode/plugin/effect/plugin"
+import { Automation } from "@opencode/core/automation"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
+import { SessionSearchBuild } from "@opencode/core/session/search-build"
 import { Session } from "@opencode/core/session"
 import { Workspace } from "@opencode/core/workspace"
 import { WorkspaceDriver } from "@opencode/core/workspace/driver"
@@ -54,6 +56,11 @@ export const create = Effect.fn("EmbeddedHost.create")(function* <R = never>(
     // The sweep is a no-op when nothing is suspended. ManagedRuntime owns the
     // fiber so recovery never delays startup but still stops with the host.
     runtime.runFork(Context.get(services, SessionRestart.Service).resumeSuspendedSessions)
+    // Same as the server process (`packages/server/src/process.ts:131-134`): automations and the one-time session
+    // search build keep their state in the database, so an embedded host runs them too. Without this the host accepts
+    // `automation.create` and never fires it (#66133).
+    runtime.runFork(Context.get(services, Automation.Service).run)
+    runtime.runFork(Context.get(services, SessionSearchBuild.Service).run)
     const handler = HttpEffect.toWebHandlerWith<never, HttpServerRequest.HttpServerRequest | Scope.Scope>(
       context(services),
     )(Context.get(services, HttpRouter.HttpRouter).asHttpEffect())
