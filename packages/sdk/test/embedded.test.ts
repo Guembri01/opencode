@@ -214,6 +214,34 @@ it.live("OpenCodeWorkerd seeds plugins before cold model resolution", () =>
 )
 
 it.live(
+  "runs a due automation on an embedded host",
+  () =>
+    withEmbedded("opencode-embedded-automation-", (fixture) =>
+    Effect.gen(function* () {
+      // The host has to start the scheduler itself: no server process is running here (#66133).
+      const opencode = yield* fixture.sdk.OpenCode.create({})
+      // A code action runs under a Session's authority, so the Session comes first.
+      const session = yield* opencode.sessions.create({ location: location(fixture) })
+      const created = yield* opencode.experimental.automation.create({
+        name: "embedded tick",
+        sessionID: session.id,
+        trigger: { type: "at", at: "in 2 seconds" },
+        action: { type: "code", code: "return { state: { runs: 1 } }" },
+      })
+      const ran = yield* opencode.experimental.automation.get({ automationID: created.id }).pipe(
+        Effect.repeat({ until: (info) => info.runCount > 0, schedule: Schedule.spaced("250 millis") }),
+        Effect.timeoutOrElse({ duration: "10 seconds", orElse: () => Effect.die(new Error("automation never ran")) }),
+      )
+      expect(ran.runCount).toBeGreaterThan(0)
+      expect(ran.lastOutcome).toBe("fired")
+    }),
+  ),
+  // The scheduler ticks on a doorbell, and this is the first automation it sees; the package's 5s default is not
+  // enough room for a code action to run.
+  30_000,
+)
+
+it.live(
   "embedded client uses the real router and handlers",
   () =>
     withEmbedded("opencode-embedded-", (fixture) =>
