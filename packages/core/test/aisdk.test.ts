@@ -1,5 +1,5 @@
 import { APICallError } from "@ai-sdk/provider"
-import type { LanguageModelV3, LanguageModelV3StreamPart } from "@ai-sdk/provider"
+import type { LanguageModelV3, LanguageModelV3Prompt, LanguageModelV3StreamPart } from "@ai-sdk/provider"
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import { AISDK } from "@opencode/core/aisdk"
 import { ModelRetry } from "@opencode/core/model-retry"
@@ -402,6 +402,37 @@ it.effect("routes AI Gateway model options by upstream prefix", () =>
     expect(fallbackPrepared.body.providerOptions).toEqual({
       deepseek: { reasoningEffort: "high" },
     })
+  }),
+)
+
+it.effect("drops turns that carry no content before they reach the provider", () =>
+  Effect.gen(function* () {
+    // Bedrock answers "text content blocks must be non-empty" and DeepSeek "all messages must have non-empty
+    // content" for these, and the 400 repeats on every later request because the turn stays in history (#64771).
+    const aisdk = yield* AISDK.Service
+    yield* aisdk.hook.sdk((event) => {
+      event.sdk = { languageModel: () => streamModel([]) }
+    })
+    const resolved = yield* aisdk.model(model("@ai-sdk/openai-compatible"))
+    const compiled = yield* compileRequest(
+      ai.request({
+        model: resolved,
+        messages: [
+          Message.user("first"),
+          Message.assistant(""),
+          Message.assistant([]),
+          Message.user(""),
+          Message.user("second"),
+        ],
+      }),
+    )
+    const prompt: LanguageModelV3Prompt = compiled.body.prompt
+    expect(prompt.filter((entry) => entry.role === "assistant")).toEqual([])
+    expect(
+      prompt.filter((entry) => entry.role === "user").map((entry) =>
+        entry.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""),
+      ),
+    ).toEqual(["first", "second"])
   }),
 )
 

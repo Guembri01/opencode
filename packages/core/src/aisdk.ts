@@ -548,10 +548,17 @@ function message(input: Exclude<LLMRequest["messages"][number], ToolMessage>): L
           ],
         },
       ]
-    case "user":
-      return [{ role: "user", content: input.content.flatMap(userPart) }]
-    case "assistant":
-      return [{ role: "assistant", content: input.content.flatMap(assistantPart) }]
+    case "user": {
+      const content = input.content.flatMap(userPart)
+      return content.length ? [{ role: "user", content }] : []
+    }
+    case "assistant": {
+      const content = input.content.flatMap(assistantPart)
+      // A strict provider rejects a turn with no content block — Bedrock "text content blocks must be non-empty",
+      // DeepSeek "all messages must have non-empty content" — and the 400 repeats on every later request because the
+      // empty turn stays in history (#64771). The session layer already drops these; this is the wire boundary.
+      return content.length ? [{ role: "assistant", content }] : []
+    }
   }
 }
 
@@ -585,7 +592,7 @@ function toolMessage(input: ToolMessage) {
 }
 
 function userPart(part: ContentPart): UserContent {
-  if (part.type === "text") return [{ type: "text", text: part.text }]
+  if (part.type === "text") return part.text.length === 0 ? [] : [{ type: "text", text: part.text }]
   if (part.type === "media")
     return [{ type: "file", mediaType: part.media.mediaType, data: fileData(part.media), filename: part.filename }]
   return []
@@ -600,7 +607,9 @@ function assistantPart(part: ContentPart): AssistantContent {
         message: "AI SDK routes cannot replay native provider compaction state",
       })
     case "text":
-      return [{ type: "text", text: part.text, providerOptions: metadataProviderOptions(part.providerMetadata) }]
+      return part.text.length === 0
+        ? []
+        : [{ type: "text", text: part.text, providerOptions: metadataProviderOptions(part.providerMetadata) }]
     case "media":
       return [{ type: "file", mediaType: part.media.mediaType, data: fileData(part.media), filename: part.filename }]
     case "reasoning":
