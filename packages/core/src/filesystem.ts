@@ -150,6 +150,13 @@ const baseLayer = Layer.effect(
     // remote sandbox or worker boundary.
     const root = environment.local
       ? yield* fs.realPath(location.directory).pipe(
+          // A Windows filter driver can report ENOENT for a path it can open (DriveCrypt, #64905). Keep the lexical
+          // path and let the access probe below decide: it still rejects a directory that is genuinely missing or
+          // unreadable, while every other realpath failure keeps its own classification.
+          Effect.catchIf(
+            (cause) => cause.reason._tag === "NotFound",
+            () => Effect.succeed(location.directory),
+          ),
           // Linux realpath succeeds on an unreadable directory, so probe readability explicitly.
           Effect.tap((real) => fs.access(real, { readable: true })),
           Effect.catch((cause): Effect.Effect<never, DirectoryNotFoundError | DirectoryAccessDeniedError> => {
