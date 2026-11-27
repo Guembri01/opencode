@@ -148,8 +148,20 @@ export function DialogSessionList() {
         .filter((session) => !session.parentID)
         .map((session) => [session.id, session]),
     )
-    const pinned = sessionTabs.enabled() ? [] : local.session.pinned().filter((sessionID) => sessionMap.has(sessionID))
-    const pinnedSet = new Set(pinned)
+    // Pinned sessions are listed whatever the list scope or page limit: one outside the query result is taken from
+    // the synced store instead of being dropped. A search still shows only the pins it matched.
+    const query = filter().trim()
+    const pinned = sessionTabs.enabled()
+      ? []
+      : local.session
+          .pinned()
+          .filter((sessionID) => query === "" || sessionMap.has(sessionID))
+          .map((sessionID) => sessionMap.get(sessionID) ?? data.session.get(sessionID))
+          .filter(
+            (session): session is SessionInfo =>
+              session !== undefined && !session.parentID && session.time.archived === undefined,
+          )
+    const pinnedSet = new Set(pinned.map((session) => session.id))
     const slotByID = new Map(local.session.slots().map((sessionID, index) => [sessionID, index + 1]))
 
     const option = (session: SessionInfo, category: string) => {
@@ -191,7 +203,7 @@ export function DialogSessionList() {
         return option(session, date === today ? "Today" : date)
       })
 
-    return [...pinned.map((sessionID) => option(sessionMap.get(sessionID)!, "Pinned")), ...remaining]
+    return [...pinned.map((session) => option(session, "Pinned")), ...remaining]
   })
 
   onMount(() => dialog.setSize("large"))

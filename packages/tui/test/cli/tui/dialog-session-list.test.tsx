@@ -8,7 +8,7 @@ import { ArgsProvider } from "../../../src/context/args"
 import { ClientProvider } from "../../../src/context/client"
 import { DataProvider, useData } from "../../../src/context/data"
 import { Keymap } from "../../../src/context/keymap"
-import { LocalProvider } from "../../../src/context/local"
+import { LocalProvider, useLocal } from "../../../src/context/local"
 import { LocationProvider } from "../../../src/context/location"
 import { PermissionProvider } from "../../../src/context/permission"
 import { RouteProvider, useRoute } from "../../../src/context/route"
@@ -122,6 +122,113 @@ test("scopes sessions to the active session location", async () => {
     const frame = await app.waitForFrame((value) => value.includes("Project B session"))
     expect(frame).not.toContain("Project A session")
     expect(requestedProjects.at(-1)).toBe("proj_b")
+  } finally {
+    app.renderer.destroy()
+    await storage.flush()
+    await temporary[Symbol.asyncDispose]()
+  }
+})
+
+test("lists a pinned session that is outside the query result", async () => {
+  const directory = "/tmp/opencode/project-pinned"
+  const events = createEventStream()
+  const calls = createFetch((url) => {
+    if (url.pathname === "/api/location")
+      return json({ directory, project: { id: "proj_p", directory, canonical: directory } })
+    if (url.pathname !== "/api/session") return undefined
+    const parentID = url.searchParams.get("parentID")
+    if (parentID && parentID !== "null") return json({ data: [], cursor: {} })
+    // The page holds one session; the pinned one is older and ranks outside it.
+    return json({
+      data: [
+        {
+          id: "ses_recent",
+          projectID: "proj_p",
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: 1, updated: 9 },
+          title: "Recent session",
+          location: { directory },
+        },
+      ],
+      cursor: {},
+    })
+  }, events)
+  const temporary = await tmpdir()
+  // Pins persist in the state directory, so seed the file a real user would already have.
+  await Bun.write(`${temporary.path}/session.json`, JSON.stringify({ pinned: ["ses_pinned"] }))
+  let storage!: ReturnType<typeof useStorage>
+  let local!: ReturnType<typeof useLocal>
+  let data!: ReturnType<typeof useData>
+
+  function Probe() {
+    const dialog = useDialog()
+    const route = useRoute()
+    data = useData()
+    local = useLocal()
+    storage = useStorage()
+    onMount(() => {
+      const base = {
+        projectID: "proj_p",
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        location: { directory },
+      }
+      data.session.remember({ ...base, id: "ses_recent", time: { created: 1, updated: 9 }, title: "Recent session" })
+      data.session.remember({ ...base, id: "ses_pinned", time: { created: 0, updated: 1 }, title: "Pinned off-page" })
+      route.navigate({ type: "session", sessionID: "ses_recent" })
+      dialog.replace(() => <DialogSessionList />)
+    })
+    return null
+  }
+
+  const app = await testRender(
+    () => (
+      <TestTuiContexts paths={{ state: temporary.path }}>
+        <TuiAppProvider value={{ name: "test", version: "test", channel: "test" }}>
+          <StorageProvider>
+            <ArgsProvider>
+              {/* Tabs off is the mode where the dialog shows the Pinned group. */}
+              <ConfigProvider config={createTuiResolvedConfig({ tabs: { mode: "off" } })}>
+                <Keymap.Provider>
+                  <ToastProvider>
+                    <RouteProvider>
+                      <ClientProvider api={createApi(calls.fetch)}>
+                        <PermissionProvider>
+                          <DataProvider directory={process.cwd()}>
+                            <LocationProvider>
+                              <SessionTabsProvider>
+                                <ThemeProvider mode="dark" source={emptyThemeSource}>
+                                  <LocalProvider>
+                                    <DialogProvider>
+                                      <Probe />
+                                    </DialogProvider>
+                                  </LocalProvider>
+                                </ThemeProvider>
+                              </SessionTabsProvider>
+                            </LocationProvider>
+                          </DataProvider>
+                        </PermissionProvider>
+                      </ClientProvider>
+                    </RouteProvider>
+                  </ToastProvider>
+                </Keymap.Provider>
+              </ConfigProvider>
+            </ArgsProvider>
+          </StorageProvider>
+        </TuiAppProvider>
+      </TestTuiContexts>
+    ),
+    { width: 100, height: 30, kittyKeyboard: true },
+  )
+  app.renderer.start()
+
+  try {
+    // The pin file is read asynchronously, so wait for the row rather than the first frame.
+    const frame = await app.waitForFrame((value) => value.includes("Pinned off-page"))
+    expect(local.session.pinned()).toContain("ses_pinned")
+    expect(data.session.get("ses_pinned")?.title).toBe("Pinned off-page")
+    expect(frame).toContain("Recent session")
   } finally {
     app.renderer.destroy()
     await storage.flush()
