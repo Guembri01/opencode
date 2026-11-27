@@ -14,6 +14,10 @@ type Options = {
 
 const startupDirectory = process.cwd()
 
+// How long a closing owner waits for the server's finalizers, such as plugin cleanup, after ending the lease. The
+// spawner's own kill follows and is a no-op once the process has exited.
+const RELEASE_TIMEOUT = "5 seconds"
+
 function command(password: string, options: Options) {
   const [executable, ...args] = options.command ?? [...selfCommand(), "serve"]
   if (!executable) throw new Error("Failed to resolve standalone server command")
@@ -23,8 +27,9 @@ function command(password: string, options: Options) {
     // OPENCODE_PASSWORD cannot shadow the child's lease credential.
     env: { OPENCODE_PASSWORD: password },
     extendEnv: true,
-    // The server treats EOF on this pipe as the end of its ownership lease.
-    // The OS closes it even when the TUI is killed before Effect finalizers run.
+    // The server treats EOF on this pipe as the end of its ownership lease. The owner completes it on the way out,
+    // with time for the server to finish, and the OS closes it even when the owner is killed before Effect finalizers
+    // run.
     stdin: "pipe",
     stderr: process.env.OPENCODE_PRINT_LOGS === "1" ? "inherit" : "ignore",
     killSignal: "SIGTERM",
@@ -37,6 +42,14 @@ const makeEndpoint = Effect.fn("cli.standalone.endpoint")(
     const password = randomBytes(32).toString("base64url")
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const proc = yield* spawner.spawn(command(password, options))
+    // The server's ownership lease is EOF on its stdin, and the spawner's own teardown kills the process outright.
+    // Complete the pipe first and give the server time to run its finalizers, such as plugin cleanup, before that.
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        yield* Stream.run(Stream.empty, proc.stdin).pipe(Effect.ignore)
+        yield* proc.exitCode.pipe(Effect.timeout(RELEASE_TIMEOUT), Effect.ignore)
+      }),
+    )
     const readyLine = yield* Deferred.make<string, Error>()
     // Keep draining stdout after readiness so later server writes cannot hit EPIPE.
     yield* proc.stdout.pipe(

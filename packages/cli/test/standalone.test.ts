@@ -37,6 +37,36 @@ test("standalone server exits when its owner is killed", async () => {
   }
 })
 
+test("standalone server finishes plugin cleanup before its owner exits", async () => {
+  await using root = await tmpdir("opencode-cli-cleanup-")
+  const receipt = path.join(root.path, "cleanup.log")
+  const plugins = path.join(root.path, "config", "plugins")
+  await Bun.write(
+    path.join(plugins, "probe.js"),
+    await Bun.file(path.join(import.meta.dir, "fixture/standalone-cleanup-plugin.js")).text(),
+  )
+  const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixture/standalone-cleanup-owner.ts")], {
+    cwd: path.join(import.meta.dir, ".."),
+    env: isolatedEnv(root.path, { CLEANUP_FILE: receipt }),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  try {
+    const line = await Promise.race([
+      readLine(owner.stdout, "STANDALONE_READY"),
+      Bun.sleep(45_000).then(() => undefined),
+    ])
+    expect(line).toBeDefined()
+    // The owner returns as soon as the plugin is loaded; the server's finalizers run while the scope closes.
+    await owner.exited
+    expect(await Bun.file(receipt).text()).toBe("setup\ncleanup-start\ncleanup-end\n")
+  } finally {
+    owner.kill("SIGKILL")
+    await owner.exited
+  }
+}, 60_000)
+
 async function readLine(stream: ReadableStream<Uint8Array>, prefix: string) {
   const reader = stream.getReader()
   const decoder = new TextDecoder()
