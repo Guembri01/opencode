@@ -1404,8 +1404,10 @@ export function createData(config: CreateDataInput) {
           (store.session.pending[event.data.sessionID] ?? []).filter((item) => item.id < event.data.to),
         )
         message.update(event.data.sessionID, (draft, index) => {
-          const position = draft.findIndex((item) => item.id >= event.data.to)
-          if (position === -1) return
+          // Position the boundary in transcript order, not by id: a steered prompt that was delivered late keeps its
+          // earlier id but sits at the end, and `id >= to` would then truncate the turns before it (#66824).
+          const position = index.get(event.data.to)
+          if (position === undefined) return
           for (const item of draft.splice(position)) index.delete(item.id)
         })
         return
