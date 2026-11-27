@@ -6,6 +6,16 @@ describe("diagram text helpers", () => {
     expect(splitDiagramLines("one<br/> two <br>three")).toEqual(["one", "two", "three"])
   })
 
+  test("splits labels on the \\n escape and on raw newlines", () => {
+    // Mermaid renders `\n` inside a label as a line break, and a label written across lines means the same (#66773).
+    expect(splitDiagramLines("Service A\\nLine 2<BR />Line 3")).toEqual(["Service A", "Line 2", "Line 3"])
+    expect(splitDiagramLines("first\nsecond\r\nthird")).toEqual(["first", "second", "third"])
+    expect(parseDiagramTextLines("<b>Service A</b>\\n<strong>Line 2</strong>")).toEqual([
+      { text: "Service A", runs: [{ text: "Service A", italic: false, bold: true }] },
+      { text: "Line 2", runs: [{ text: "Line 2", italic: false, bold: true }] },
+    ])
+  })
+
   test("extracts Mermaid italic markup from visible text", () => {
     expect(parseDiagramTextLines("plain <i>italic</i><br/><em>again</em>")).toEqual([
       {

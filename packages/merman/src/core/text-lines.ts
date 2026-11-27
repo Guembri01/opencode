@@ -10,7 +10,8 @@ export interface DiagramTextLine {
 }
 
 export function parseDiagramTextLines(value: string): DiagramTextLine[] {
-  return value.split(/<br\s*\/?>/i).map((line) => {
+  // Mermaid breaks a label on `<br>`, on the `\n` escape, and on a real newline from a multi-line label.
+  return value.split(/<br\s*\/?>|\\n|\r?\n/i).map((line) => {
     const runs: DiagramTextRun[] = []
     const source = line.trim()
     const tag = /<(\/?)(i|em|b|strong)\s*>/gi
