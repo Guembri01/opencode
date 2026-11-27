@@ -29,6 +29,7 @@ export type RunCommandInput = {
   archived?: boolean
   thinking?: boolean
   auto?: boolean
+  background?: "wait" | "detach" | "kill"
 }
 
 type FilePart = { text: string } | { attachment: { uri: string; name: string } }
@@ -138,6 +139,7 @@ async function execute(input: RunCommandInput, prepared: Prepared, endpoint: End
     format: input.format,
     auto: input.auto ?? false,
     standalone: input.server.standalone ?? false,
+    background: input.background ?? "wait",
     signal,
     renderTool: (part) => renderTool(part, target.location.directory),
     renderToolError: (part) => renderToolError(part, target.location.directory),

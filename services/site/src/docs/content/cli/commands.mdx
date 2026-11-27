@@ -50,6 +50,14 @@ Emit newline-delimited JSON for scripts.
 $ opencode run --format json "List the TODO comments"
 ```
 
+Choose what happens to background jobs the reply leaves running. `wait` (the default) waits for them, `detach` exits with the reply and leaves them running, and `kill` stops them before exiting.
+
+```bash
+$ opencode run --background detach "Start the dev server and reply done"
+```
+
+With `--format json`, all three emit a `background_wait` event naming the jobs (`id`, `kind`, `title`); `detach` and `kill` end the stream right after it instead of staying open.
+
 Attach files to the message.
 
 ```bash

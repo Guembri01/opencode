@@ -30,6 +30,8 @@ type Input = {
   auto: boolean
   /** The server is private to this run, so MCP input requests in its location are this run's too. */
   standalone: boolean
+  /** What to do when the reply is complete and its background jobs are still running. */
+  background: "wait" | "detach" | "kill"
   /** Aborted on SIGINT or SIGTERM: the run cancels its Session and background jobs, then returns. */
   signal: AbortSignal
   renderTool: (part: SessionMessageAssistantTool) => Promise<void>
@@ -178,6 +180,20 @@ export async function runNonInteractivePrompt(input: Input) {
     }
   }
 
+  // Stop the jobs a run is done with. Images, videos and Code Mode jobs have no cancel through the API, so they are
+  // left to finish; this is the same set `cancel()` interrupts.
+  const stopJobs = (jobs: Job[]) =>
+    Promise.all(
+      jobs.map((job) =>
+        (job.kind === "shell"
+          ? input.client.shell.remove({ id: job.shellID, location: { directory: input.location.directory } })
+          : job.kind === "subagent"
+            ? input.client.session.interrupt({ sessionID: job.childSessionID })
+            : Promise.resolve()
+        ).catch(() => {}),
+      ),
+    )
+
   // The jobs this prompt started (older ones belong to someone else), or `[]` while one of their wakes
   // is queued or running. Work moves job → inbox → active, so reading in that order can't miss it.
   const background = async () => {
@@ -247,6 +263,11 @@ export async function runNonInteractivePrompt(input: Input) {
         const pending = state.failure ? undefined : await background()
         if (!pending) return { ...projected, background: waited }
         if (pending.length > 0 && pending.length !== shown) render.waiting(pending)
+        // The reply is complete. `wait` is the default; the other two let a script end the run without the jobs.
+        if (input.background !== "wait") {
+          if (input.background === "kill") await stopJobs(pending)
+          return { ...projected, background: waited }
+        }
         shown = pending.length || shown
         waited = true
       }
@@ -264,14 +285,7 @@ export async function runNonInteractivePrompt(input: Input) {
     const running = (await background().catch(() => undefined)) ?? []
     await Promise.all([
       input.client.session.interrupt({ sessionID: input.sessionID }).catch(() => {}),
-      ...running.map((job) =>
-        (job.kind === "shell"
-          ? input.client.shell.remove({ id: job.shellID, location: { directory: input.location.directory } })
-          : job.kind === "subagent"
-            ? input.client.session.interrupt({ sessionID: job.childSessionID })
-            : Promise.resolve()
-        ).catch(() => {}),
-      ),
+      stopJobs(running),
     ])
     while (true) {
       const ended = state.ended.promise
@@ -473,9 +487,12 @@ function renderer(input: Input) {
     waiting: (jobs: Job[]) => {
       const list = jobs.map((job) => ({ id: job.id, kind: job.kind, title: job.title }))
       if (emit("background_wait", Date.now(), { jobs: list })) return
+      const verb =
+        input.background === "detach" ? "leaving" : input.background === "kill" ? "stopping" : "waiting for"
       UI.println(
         UI.Style.TEXT_DIM +
-          `waiting for ${jobs.length} background job${jobs.length === 1 ? "" : "s"}` +
+          `${verb} ${jobs.length} background job${jobs.length === 1 ? "" : "s"}` +
+          (input.background === "detach" ? " running" : "") +
           UI.Style.TEXT_NORMAL,
       )
     },

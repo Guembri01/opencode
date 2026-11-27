@@ -265,6 +265,7 @@ async function run(input: {
   messages?: (inboxID: string) => SessionMessageInfo[]
   wait?: () => Promise<void>
   jobs?: () => ExperimentalJobListOutput
+  background?: "wait" | "detach" | "kill"
   inbox?: (sessionID: string) => SessionInboxListOutput
   active?: () => SessionActiveOutput
   terminalDelay?: number
@@ -340,6 +341,7 @@ async function run(input: {
     format: input.format ?? "default",
     auto: false,
     standalone: input.standalone ?? false,
+    background: input.background ?? "wait",
     signal: input.signal ?? new AbortController().signal,
     renderTool: input.renderTool ?? (() => Promise.resolve()),
     renderToolError: input.renderToolError ?? (() => Promise.resolve()),
@@ -360,8 +362,8 @@ async function capture(input: Parameters<typeof run>[0]) {
     return true
   })
   try {
-    await run(input)
-    return { stdout: stdout.join(""), stderr: stderr.join(""), exitCode: process.exitCode }
+    const sdk = await run(input)
+    return { stdout: stdout.join(""), stderr: stderr.join(""), exitCode: process.exitCode, sdk }
   } finally {
     process.exitCode = exitCode ?? 0
     stdoutWrite.mockRestore()
@@ -754,6 +756,36 @@ describe("runNonInteractivePrompt", () => {
     })
     expect(output.stdout).toContain("Training finished.")
     expect(lists).toEqual([])
+  })
+
+  test("detach ends the run with the reply while its background job keeps running", async () => {
+    const output = await capture({
+      background: "detach",
+      jobs: () => [shellJob("sh_dev", "dev server")],
+      turn: (id) => [prompted(id), settled()],
+    })
+    // The default format says what happens to the jobs instead of claiming the run waits for them.
+    expect(output.stderr).toContain("leaving 1 background job running")
+    expect(output.sdk.shell.remove).not.toHaveBeenCalled()
+    expect(output.exitCode ?? 0).toBe(0)
+  })
+
+  test("kill stops the background jobs and then ends the run", async () => {
+    const output = await capture({
+      background: "kill",
+      format: "json",
+      jobs: () => [shellJob("sh_dev", "dev server"), { ...subagentJob, id: "ses_scan", childSessionID: "ses_scan" }],
+      turn: (id) => [prompted(id), settled()],
+    })
+    expect(output.sdk.shell.remove).toHaveBeenCalledWith({ id: "sh_dev", location: { directory: location.directory } })
+    expect(output.sdk.session.interrupt).toHaveBeenCalledWith({ sessionID: "ses_scan" })
+    // The caller still learns which jobs were left when the run ended.
+    expect(jsonLines(output.stdout).find((event) => event.type === "background_wait")).toMatchObject({
+      jobs: [
+        { id: "sh_dev", kind: "shell" },
+        { id: "ses_scan", kind: "subagent" },
+      ],
+    })
   })
 
   for (const outcome of ["failed", "interrupted"] as const) {

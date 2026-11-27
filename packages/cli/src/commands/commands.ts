@@ -465,6 +465,12 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           Flag.withDefault(false),
         ),
         thinking: Flag.Boolean("thinking").pipe(Flag.withDescription("Show thinking blocks"), Flag.withDefault(false)),
+        background: Flag.Literals("background", ["wait", "detach", "kill"]).pipe(
+          Flag.withDescription(
+            "What to do when the reply is complete and its background jobs are still running: wait for them, leave them running, or stop them",
+          ),
+          Flag.withDefault("wait"),
+        ),
         ...PermissionParams,
       },
     }),
